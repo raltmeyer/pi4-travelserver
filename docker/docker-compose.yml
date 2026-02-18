@@ -22,7 +22,7 @@ services:
       - TZ=${TIMEZONE:-America/Sao_Paulo}
       - USERID=1000
       - GROUPID=1000
-      - SHARE=share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;all;none;
+      - SHARE=share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;valid_users;none;
       - WORKGROUP=WORKGROUP
     ports:
       - "137:137/udp"
@@ -31,7 +31,11 @@ services:
       - "445:445/tcp"
     volumes:
       - ${MOUNT_POINT:-/mnt/ssd}/files:/${MOUNT_POINT:-/mnt/ssd}/files
-    command: '-s "share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;all;none;"'
+      - samba_data:/var/lib/samba
+    command: '-s "share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;valid_users;none;"'
+
+volumes:
+  samba_data:
 
 networks:
   default:

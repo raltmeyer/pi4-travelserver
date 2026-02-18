@@ -53,3 +53,10 @@ docker compose -f "$COMPOSE_DIR/docker-compose.yml" ps
 echo ""
 echo "FileBrowser: http://$(hostname -I | awk '{print $1}'):8080"
 echo "Samba Share: \\\\$(hostname -I | awk '{print $1}')\\share"
+echo ""
+echo "--- FileBrowser Admin Password ---"
+echo "FileBrowser generates a random password on first run."
+echo "Checking logs for password..."
+sleep 2 # Wait for logs to populate
+docker compose -f "$COMPOSE_DIR/docker-compose.yml" logs filebrowser | grep "User 'admin' initialized" || echo "Password not found in recent logs. Run: docker logs filebrowser | grep User"
+echo "----------------------------------"
