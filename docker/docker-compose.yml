@@ -22,7 +22,7 @@ services:
       - TZ=${TIMEZONE:-America/Sao_Paulo}
       - USERID=1000
       - GROUPID=1000
-      - SHARE=share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;valid_users;none;
+      - SHARE=share;/share;yes;no;no;;none;
       - WORKGROUP=WORKGROUP
     ports:
       - "137:137/udp"
@@ -30,9 +30,9 @@ services:
       - "139:139/tcp"
       - "445:445/tcp"
     volumes:
-      - ${MOUNT_POINT:-/mnt/ssd}/files:/${MOUNT_POINT:-/mnt/ssd}/files
+      - ${MOUNT_POINT:-/mnt/ssd}/files:/share
       - samba_data:/var/lib/samba
-    command: '-s "share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;valid_users;none;"'
+    command: '-s "share;/share;yes;no;no;;none;" -g "vfs objects = catia recycle"'
 
 volumes:
   samba_data:
