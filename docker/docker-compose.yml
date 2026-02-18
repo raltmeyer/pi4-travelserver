@@ -1,0 +1,38 @@
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: filebrowser
+    restart: unless-stopped
+    user: "1000:1000" # Match the owner of the mounted drive
+    ports:
+      - "8080:80"
+    volumes:
+      - ${MOUNT_POINT}/files:/srv
+      - ./filebrowser.db:/database.db
+      - ./.filebrowser.json:/.filebrowser.json
+    environment:
+      - FB_DATABASE=/database.db
+      - FB_ROOT=/srv
+
+  samba:
+    image: dperson/samba
+    container_name: samba
+    restart: unless-stopped
+    environment:
+      - TZ=${TIMEZONE}
+      - USERID=1000
+      - GROUPID=1000
+      - SHARE=share;${MOUNT_POINT}/files;yes;no;no;all;none;
+      - WORKGROUP=WORKGROUP
+    ports:
+      - "137:137/udp"
+      - "138:138/udp"
+      - "139:139/tcp"
+      - "445:445/tcp"
+    volumes:
+      - ${MOUNT_POINT}/files:/${MOUNT_POINT}/files
+    command: '-s "share;${MOUNT_POINT}/files;yes;no;no;all;none;"'
+
+networks:
+  default:
+    driver: bridge

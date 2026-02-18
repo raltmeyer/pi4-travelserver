@@ -1,0 +1,14 @@
+[Unit]
+Description=Travel Server Hardware Bridge
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/admin/bridge/main.py
+WorkingDirectory=/home/admin/bridge
+Restart=always
+User=root
+Group=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
