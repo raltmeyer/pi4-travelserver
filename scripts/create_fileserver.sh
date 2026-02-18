@@ -27,6 +27,23 @@ fi
 mkdir -p "$MOUNT_POINT/files"
 chown 1000:1000 "$MOUNT_POINT/files"
 
+# --- PERMANENT FIX: Pre-create files to avoid Docker creating directories ---
+DB_FILE="$COMPOSE_DIR/filebrowser.db"
+JSON_FILE="$COMPOSE_DIR/.filebrowser.json"
+
+if [ ! -f "$DB_FILE" ]; then
+    echo "Initializing empty database file..."
+    touch "$DB_FILE"
+    chmod 666 "$DB_FILE"
+fi
+
+if [ ! -f "$JSON_FILE" ]; then
+    echo "Initializing default config file..."
+    echo '{}' > "$JSON_FILE"
+    chmod 666 "$JSON_FILE"
+fi
+# ---------------------------------------------------------------------------
+
 echo "Creating and starting fileserver containers..."
 docker compose -f "$COMPOSE_DIR/docker-compose.yml" up -d
 

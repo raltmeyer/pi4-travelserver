@@ -7,7 +7,7 @@ services:
     ports:
       - "8080:80"
     volumes:
-      - ${MOUNT_POINT}/files:/srv
+      - ${MOUNT_POINT:-/mnt/ssd}/files:/srv
       - ./filebrowser.db:/database.db
       - ./.filebrowser.json:/.filebrowser.json
     environment:
@@ -19,10 +19,10 @@ services:
     container_name: samba
     restart: unless-stopped
     environment:
-      - TZ=${TIMEZONE}
+      - TZ=${TIMEZONE:-America/Sao_Paulo}
       - USERID=1000
       - GROUPID=1000
-      - SHARE=share;${MOUNT_POINT}/files;yes;no;no;all;none;
+      - SHARE=share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;all;none;
       - WORKGROUP=WORKGROUP
     ports:
       - "137:137/udp"
@@ -30,8 +30,8 @@ services:
       - "139:139/tcp"
       - "445:445/tcp"
     volumes:
-      - ${MOUNT_POINT}/files:/${MOUNT_POINT}/files
-    command: '-s "share;${MOUNT_POINT}/files;yes;no;no;all;none;"'
+      - ${MOUNT_POINT:-/mnt/ssd}/files:/${MOUNT_POINT:-/mnt/ssd}/files
+    command: '-s "share;${MOUNT_POINT:-/mnt/ssd}/files;yes;no;no;all;none;"'
 
 networks:
   default:
