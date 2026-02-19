@@ -1,0 +1,463 @@
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
+#include <lvgl.h>
+
+// =============================================
+// TOUCH PINS (VSPI - separate from TFT HSPI)
+// =============================================
+#define TP_CLK 25
+#define TP_CS 33
+#define TP_DIN 32
+#define TP_OUT 39
+#define TP_IRQ 36
+
+// =============================================
+// DISPLAY
+// =============================================
+static const uint16_t screenWidth = 320;
+static const uint16_t screenHeight = 240;
+
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf1[screenWidth * 20];
+
+TFT_eSPI tft = TFT_eSPI();
+SPIClass touchSPI(VSPI);
+
+// =============================================
+// UI ELEMENTS
+// =============================================
+lv_obj_t *tabview;
+// Status tab
+lv_obj_t *bar_cpu, *bar_ram, *bar_disk;
+lv_obj_t *lbl_cpu_val, *lbl_ram_val, *lbl_disk_val;
+lv_obj_t *lbl_ram_detail, *lbl_disk_detail;
+lv_obj_t *lbl_temp, *lbl_uptime;
+lv_obj_t *lbl_ip_ap, *lbl_ip_wan;
+
+// Serial buffer
+String serialBuffer = "";
+
+// =============================================
+// RAW SPI TOUCH (from firmware_v1)
+// =============================================
+uint16_t touchReadChannel(uint8_t cmd) {
+  touchSPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(TP_CS, LOW);
+  touchSPI.transfer(cmd);
+  uint8_t hi = touchSPI.transfer(0);
+  uint8_t lo = touchSPI.transfer(0);
+  digitalWrite(TP_CS, HIGH);
+  touchSPI.endTransaction();
+  return ((hi << 8) | lo) >> 3;
+}
+
+void touchPowerDown() {
+  touchSPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(TP_CS, LOW);
+  touchSPI.transfer(0x80);
+  touchSPI.transfer(0);
+  touchSPI.transfer(0);
+  digitalWrite(TP_CS, HIGH);
+  touchSPI.endTransaction();
+}
+
+bool getTouch(int &x, int &y) {
+  if (digitalRead(TP_IRQ) != LOW)
+    return false;
+  uint16_t z1 = touchReadChannel(0xB1);
+  uint16_t z2 = touchReadChannel(0xC1);
+  int z = z1 + 4095 - z2;
+  if (z > 400) {
+    uint16_t rawX = touchReadChannel(0xD1);
+    uint16_t rawY = touchReadChannel(0x91);
+    touchPowerDown();
+    x = map(rawY, 200, 3800, 0, 320);
+    y = map(rawX, 300, 3700, 0, 240);
+    x = constrain(x, 0, 319);
+    y = constrain(y, 0, 239);
+    return true;
+  }
+  touchPowerDown();
+  return false;
+}
+
+// =============================================
+// LVGL DISPLAY DRIVER
+// =============================================
+void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area,
+                   lv_color_t *color_p) {
+  uint32_t w = (area->x2 - area->x1 + 1);
+  uint32_t h = (area->y2 - area->y1 + 1);
+  tft.startWrite();
+  tft.setAddrWindow(area->x1, area->y1, w, h);
+  tft.pushColors((uint16_t *)&color_p->full, w * h, true);
+  tft.endWrite();
+  lv_disp_flush_ready(disp);
+}
+
+// =============================================
+// LVGL TOUCH INPUT DRIVER
+// =============================================
+static int last_touch_x = 0, last_touch_y = 0;
+
+void my_touchpad_read(lv_indev_drv_t *indev, lv_indev_data_t *data) {
+  int x, y;
+  if (getTouch(x, y)) {
+    data->state = LV_INDEV_STATE_PR;
+    data->point.x = x;
+    data->point.y = y;
+    last_touch_x = x;
+    last_touch_y = y;
+  } else {
+    data->state = LV_INDEV_STATE_REL;
+    data->point.x = last_touch_x;
+    data->point.y = last_touch_y;
+  }
+}
+
+// =============================================
+// SEND COMMAND TO BRIDGE
+// =============================================
+void sendCommand(const char *action) {
+  JsonDocument doc;
+  doc["action"] = action;
+  String json;
+  serializeJson(doc, json);
+  Serial.println(json);
+}
+
+// =============================================
+// BUTTON EVENT HANDLER (with confirmation)
+// =============================================
+static void btn_event_cb(lv_event_t *e) {
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED)
+    return;
+
+  const char *action = (const char *)lv_event_get_user_data(e);
+  lv_obj_t *btn = lv_event_get_target(e);
+
+  // Get button label text for the dialog
+  lv_obj_t *label = lv_obj_get_child(btn, 0);
+  const char *btn_text = lv_label_get_text(label);
+
+  // Create msgbox for confirmation
+  static const char *btns[] = {"YES", "NO", ""};
+  char msg[64];
+  snprintf(msg, sizeof(msg), "%s", btn_text);
+
+  lv_obj_t *mbox = lv_msgbox_create(NULL, "Confirm?", msg, btns, false);
+  lv_obj_center(mbox);
+  lv_obj_set_width(mbox, 260);
+
+  // Store action string in mbox user data
+  lv_obj_set_user_data(mbox, (void *)action);
+
+  // Add event handler for msgbox buttons
+  lv_obj_add_event_cb(
+      mbox,
+      [](lv_event_t *ev) {
+        lv_obj_t *msgbox = lv_event_get_current_target(ev);
+        uint16_t idx = lv_msgbox_get_active_btn(msgbox);
+        if (idx == 0) { // YES
+          const char *act = (const char *)lv_obj_get_user_data(msgbox);
+          sendCommand(act);
+
+          // Show "Sent!" notification
+          lv_obj_t *notif = lv_msgbox_create(NULL, NULL, "Sent!", NULL, true);
+          lv_obj_center(notif);
+
+          // Auto-close after 1.5s
+          static lv_timer_t *tmr = NULL;
+          tmr = lv_timer_create(
+              [](lv_timer_t *t) {
+                lv_obj_t *n = (lv_obj_t *)t->user_data;
+                if (n)
+                  lv_msgbox_close(n);
+                lv_timer_del(t);
+              },
+              1500, notif);
+        }
+        lv_msgbox_close(msgbox);
+      },
+      LV_EVENT_VALUE_CHANGED, NULL);
+}
+
+// =============================================
+// BUILD UI
+// =============================================
+
+// Helper: create styled progress bar row
+lv_obj_t *create_stat_row(lv_obj_t *parent, const char *name, lv_color_t color,
+                          lv_obj_t **bar_out, lv_obj_t **val_out,
+                          lv_obj_t **detail_out) {
+  // Container row
+  lv_obj_t *row = lv_obj_create(parent);
+  lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(row, 0, 0);
+  lv_obj_set_style_pad_all(row, 2, 0);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(row, 2, 0);
+
+  // Top line: label + bar + value
+  lv_obj_t *top = lv_obj_create(row);
+  lv_obj_set_size(top, lv_pct(100), 22);
+  lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(top, 0, 0);
+  lv_obj_set_style_pad_all(top, 0, 0);
+
+  // Label
+  lv_obj_t *lbl = lv_label_create(top);
+  lv_label_set_text(lbl, name);
+  lv_obj_set_style_text_color(lbl, color, 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+  lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+  // Bar
+  *bar_out = lv_bar_create(top);
+  lv_obj_set_size(*bar_out, 170, 14);
+  lv_bar_set_range(*bar_out, 0, 100);
+  lv_obj_set_style_bg_color(*bar_out, lv_color_hex(0x2945), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(*bar_out, color, LV_PART_INDICATOR);
+  lv_obj_set_style_radius(*bar_out, 4, LV_PART_MAIN);
+  lv_obj_set_style_radius(*bar_out, 4, LV_PART_INDICATOR);
+  lv_obj_align(*bar_out, LV_ALIGN_LEFT_MID, 42, 0);
+
+  // Value
+  *val_out = lv_label_create(top);
+  lv_label_set_text(*val_out, "0%");
+  lv_obj_set_style_text_font(*val_out, &lv_font_montserrat_14, 0);
+  lv_obj_align(*val_out, LV_ALIGN_RIGHT_MID, 0, 0);
+
+  // Detail line (optional)
+  if (detail_out) {
+    *detail_out = lv_label_create(row);
+    lv_label_set_text(*detail_out, "");
+    lv_obj_set_style_text_color(*detail_out, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(*detail_out, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_left(*detail_out, 42, 0);
+  }
+
+  return row;
+}
+
+// Helper: create control button
+void create_ctrl_btn(lv_obj_t *parent, const char *label, const char *action,
+                     lv_color_t color) {
+  lv_obj_t *btn = lv_btn_create(parent);
+  lv_obj_set_size(btn, 140, 40);
+  lv_obj_set_style_bg_color(btn, color, 0);
+  lv_obj_set_style_radius(btn, 6, 0);
+
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, label);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+  lv_obj_center(lbl);
+
+  lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, (void *)action);
+}
+
+void build_ui() {
+  // Dark theme background
+  lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x1A1A2E), 0);
+
+  tabview = lv_tabview_create(lv_scr_act(), LV_DIR_BOTTOM, 36);
+  lv_obj_set_style_bg_color(tabview, lv_color_hex(0x1A1A2E), 0);
+
+  // Style tab buttons
+  lv_obj_t *tab_btns = lv_tabview_get_tab_btns(tabview);
+  lv_obj_set_style_bg_color(tab_btns, lv_color_hex(0x16213E), 0);
+  lv_obj_set_style_text_font(tab_btns, &lv_font_montserrat_16, 0);
+
+  // ========== STATUS TAB ==========
+  lv_obj_t *tab_status = lv_tabview_add_tab(tabview, "STATUS");
+  lv_obj_set_style_bg_color(tab_status, lv_color_hex(0x1A1A2E), 0);
+  lv_obj_set_flex_flow(tab_status, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(tab_status, 0, 0);
+  lv_obj_set_style_pad_all(tab_status, 4, 0);
+
+  // CPU bar
+  create_stat_row(tab_status, "CPU", lv_color_hex(0x00E676), &bar_cpu,
+                  &lbl_cpu_val, NULL);
+
+  // RAM bar + detail
+  create_stat_row(tab_status, "RAM", lv_color_hex(0x00B0FF), &bar_ram,
+                  &lbl_ram_val, &lbl_ram_detail);
+
+  // Disk bar + detail
+  create_stat_row(tab_status, "DSK", lv_color_hex(0xFFD600), &bar_disk,
+                  &lbl_disk_val, &lbl_disk_detail);
+
+  // Temperature + Uptime row
+  lv_obj_t *info_row = lv_obj_create(tab_status);
+  lv_obj_set_size(info_row, lv_pct(100), 28);
+  lv_obj_set_style_bg_opa(info_row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(info_row, 0, 0);
+  lv_obj_set_style_pad_all(info_row, 0, 0);
+
+  lbl_temp = lv_label_create(info_row);
+  lv_label_set_text(lbl_temp, "-- °C");
+  lv_obj_set_style_text_font(lbl_temp, &lv_font_montserrat_20, 0);
+  lv_obj_set_style_text_color(lbl_temp, lv_color_hex(0x00E676), 0);
+  lv_obj_align(lbl_temp, LV_ALIGN_LEFT_MID, 4, 0);
+
+  lbl_uptime = lv_label_create(info_row);
+  lv_label_set_text(lbl_uptime, "UP --");
+  lv_obj_set_style_text_font(lbl_uptime, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(lbl_uptime, lv_color_hex(0x888888), 0);
+  lv_obj_align(lbl_uptime, LV_ALIGN_RIGHT_MID, -4, 0);
+
+  // Network IPs row
+  lv_obj_t *net_row = lv_obj_create(tab_status);
+  lv_obj_set_size(net_row, lv_pct(100), 20);
+  lv_obj_set_style_bg_opa(net_row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(net_row, 0, 0);
+  lv_obj_set_style_pad_all(net_row, 0, 0);
+
+  lbl_ip_ap = lv_label_create(net_row);
+  lv_label_set_text(lbl_ip_ap, "AP: --");
+  lv_obj_set_style_text_color(lbl_ip_ap, lv_color_hex(0x04FFFF), 0);
+  lv_obj_set_style_text_font(lbl_ip_ap, &lv_font_montserrat_14, 0);
+  lv_obj_align(lbl_ip_ap, LV_ALIGN_LEFT_MID, 4, 0);
+
+  lbl_ip_wan = lv_label_create(net_row);
+  lv_label_set_text(lbl_ip_wan, "WAN: --");
+  lv_obj_set_style_text_color(lbl_ip_wan, lv_color_hex(0x04FFFF), 0);
+  lv_obj_set_style_text_font(lbl_ip_wan, &lv_font_montserrat_14, 0);
+  lv_obj_align(lbl_ip_wan, LV_ALIGN_RIGHT_MID, -4, 0);
+
+  // ========== CONTROLS TAB ==========
+  lv_obj_t *tab_ctrl = lv_tabview_add_tab(tabview, "CONTROL");
+  lv_obj_set_style_bg_color(tab_ctrl, lv_color_hex(0x1A1A2E), 0);
+  lv_obj_set_style_pad_all(tab_ctrl, 4, 0);
+
+  // Flex wrap layout: 2 columns
+  lv_obj_set_flex_flow(tab_ctrl, LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(tab_ctrl, LV_FLEX_ALIGN_SPACE_EVENLY,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_column(tab_ctrl, 8, 0);
+  lv_obj_set_style_pad_row(tab_ctrl, 6, 0);
+
+  create_ctrl_btn(tab_ctrl, "Reset Net", "reset_network",
+                  lv_color_hex(0xFC6000));
+  create_ctrl_btn(tab_ctrl, "FW Strict", "fw_strict", lv_color_hex(0xD00000));
+  create_ctrl_btn(tab_ctrl, "FW Maint", "fw_maint", lv_color_hex(0xC8A000));
+  create_ctrl_btn(tab_ctrl, "Start SMB", "start_smb", lv_color_hex(0x00804A));
+  create_ctrl_btn(tab_ctrl, "Stop SMB", "stop_smb", lv_color_hex(0xD00000));
+  create_ctrl_btn(tab_ctrl, "Reboot", "reboot", lv_color_hex(0xFC6000));
+  create_ctrl_btn(tab_ctrl, "Shutdown", "shutdown", lv_color_hex(0x800020));
+}
+
+// =============================================
+// UPDATE STATS FROM JSON
+// =============================================
+void updateStats(const String &line) {
+  JsonDocument doc;
+  if (deserializeJson(doc, line))
+    return;
+
+  float cpu = doc["cpu"] | 0.0f;
+  lv_bar_set_value(bar_cpu, (int)cpu, LV_ANIM_ON);
+  lv_label_set_text_fmt(lbl_cpu_val, "%.0f%%", cpu);
+
+  int ram_total = doc["ram"]["total"] | 0;
+  int ram_used = doc["ram"]["used"] | 0;
+  float ram_pct = doc["ram"]["percent"] | 0.0f;
+  lv_bar_set_value(bar_ram, (int)ram_pct, LV_ANIM_ON);
+  lv_label_set_text_fmt(lbl_ram_val, "%.0f%%", ram_pct);
+  lv_label_set_text_fmt(lbl_ram_detail, "%d / %d MB", ram_used, ram_total);
+
+  int disk_total = doc["disk"]["total"] | 0;
+  int disk_used = doc["disk"]["used"] | 0;
+  float disk_pct = doc["disk"]["percent"] | 0.0f;
+  lv_bar_set_value(bar_disk, (int)disk_pct, LV_ANIM_ON);
+  lv_label_set_text_fmt(lbl_disk_val, "%.0f%%", disk_pct);
+  lv_label_set_text_fmt(lbl_disk_detail, "%d / %d GB", disk_used, disk_total);
+
+  float temp = doc["temp"] | 0.0f;
+  lv_color_t tc = lv_color_hex(0x00E676);
+  if (temp > 70)
+    tc = lv_color_hex(0xFF1744);
+  else if (temp > 55)
+    tc = lv_color_hex(0xFD6D20);
+  lv_obj_set_style_text_color(lbl_temp, tc, 0);
+  lv_label_set_text_fmt(lbl_temp, "%.1f °C", temp);
+
+  int uptime = doc["uptime"] | 0;
+  lv_label_set_text_fmt(lbl_uptime, "UP %dh%dm", uptime / 3600,
+                        (uptime % 3600) / 60);
+
+  const char *ip0 = doc["net"]["wlan0"] | "N/A";
+  const char *ip1 = doc["net"]["wlan1"] | "N/A";
+  lv_label_set_text_fmt(lbl_ip_ap, "AP: %s", ip0);
+  lv_label_set_text_fmt(lbl_ip_wan, "WAN: %s", ip1);
+}
+
+// =============================================
+// SETUP
+// =============================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Init TFT
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+
+  // Init Touch (separate VSPI bus)
+  pinMode(TP_CS, OUTPUT);
+  digitalWrite(TP_CS, HIGH);
+  pinMode(TP_IRQ, INPUT);
+  touchSPI.begin(TP_CLK, TP_OUT, TP_DIN, TP_CS);
+  touchPowerDown();
+
+  // Init LVGL
+  lv_init();
+  lv_disp_draw_buf_init(&draw_buf, buf1, NULL, screenWidth * 20);
+
+  // Display driver
+  static lv_disp_drv_t disp_drv;
+  lv_disp_drv_init(&disp_drv);
+  disp_drv.hor_res = screenWidth;
+  disp_drv.ver_res = screenHeight;
+  disp_drv.flush_cb = my_disp_flush;
+  disp_drv.draw_buf = &draw_buf;
+  lv_disp_drv_register(&disp_drv);
+
+  // Input driver (touch)
+  static lv_indev_drv_t indev_drv;
+  lv_indev_drv_init(&indev_drv);
+  indev_drv.type = LV_INDEV_TYPE_POINTER;
+  indev_drv.read_cb = my_touchpad_read;
+  lv_indev_drv_register(&indev_drv);
+
+  build_ui();
+}
+
+// =============================================
+// LOOP
+// =============================================
+void loop() {
+  lv_timer_handler();
+
+  // Read serial from bridge
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      if (serialBuffer.length() > 0 && serialBuffer.charAt(0) == '{') {
+        updateStats(serialBuffer);
+      }
+      serialBuffer = "";
+    } else if (c != '\r') {
+      serialBuffer += c;
+      if (serialBuffer.length() > 512)
+        serialBuffer = "";
+    }
+  }
+
+  delay(5);
+}
