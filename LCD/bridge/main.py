@@ -86,8 +86,11 @@ class SerialBridge:
             port = self.find_esp32()
             if port:
                 try:
-                    self.ser = serial.Serial(port, SERIAL_BAUDRATE, timeout=1)
+                    self.ser = serial.Serial(port, SERIAL_BAUDRATE, timeout=1, rtscts=False, dsrdtr=False)
+                    self.ser.dtr = False
+                    self.ser.rts = False
                     print(f"Connected to ESP32 on {port}")
+                    self.ser.reset_input_buffer()
                     return True
                 except Exception as e:
                     print(f"Failed to connect: {e}")
@@ -96,12 +99,15 @@ class SerialBridge:
             time.sleep(5)
 
     def read_loop(self):
+        print("Read loop started")
         while self.running:
             if self.ser and self.ser.is_open:
                 try:
                     if self.ser.in_waiting > 0:
                         line = self.ser.readline().decode('utf-8').strip()
                         if line:
+                            # Debug: print all lines
+                            print(f"[RAW] {line}")
                             self.handle_command(line)
                 except Exception as e:
                     print(f"Read error: {e}")
@@ -118,7 +124,16 @@ class SerialBridge:
                 subprocess.run(["sudo", "reboot"])
             elif cmd.get("action") == "shutdown":
                 subprocess.run(["sudo", "shutdown", "-h", "now"])
-            # Add more commands here (e.g. scan wifi)
+            elif cmd.get("action") == "reset_network":
+                subprocess.run(["sudo", "/home/raltmeyer/pi4-travelserver/scripts/full_network_reset.sh"])
+            elif cmd.get("action") == "fw_strict":
+                subprocess.run(["sudo", "/home/raltmeyer/pi4-travelserver/scripts/firewall_strict.sh"])
+            elif cmd.get("action") == "fw_maint":
+                subprocess.run(["sudo", "/home/raltmeyer/pi4-travelserver/scripts/firewall_maintenance.sh"])
+            elif cmd.get("action") == "start_smb":
+                subprocess.run(["sudo", "/home/raltmeyer/pi4-travelserver/scripts/start_fileserver.sh"])
+            elif cmd.get("action") == "stop_smb":
+                subprocess.run(["sudo", "/home/raltmeyer/pi4-travelserver/scripts/stop_fileserver.sh"])
             
         except json.JSONDecodeError:
             print(f"Invalid JSON received: {data}")
