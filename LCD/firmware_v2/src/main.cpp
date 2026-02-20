@@ -13,6 +13,12 @@
 #define TP_OUT 39
 #define TP_IRQ 36
 
+/* Backlight Control */
+#define TFT_BL 21
+static const unsigned long SCREEN_TIMEOUT = 15000; /* 15 seconds */
+static unsigned long last_activity = 0;
+static bool display_on = true;
+
 /* Change to your screen resolution */
 static const uint16_t screenWidth = 320;
 static const uint16_t screenHeight = 240;
@@ -99,6 +105,17 @@ static int last_touch_x = 0, last_touch_y = 0;
 void my_touchpad_read(lv_indev_drv_t *indev, lv_indev_data_t *data) {
   int x, y;
   if (getTouch(x, y)) {
+    /* Wake up screen if off */
+    if (!display_on) {
+      display_on = true;
+      digitalWrite(TFT_BL, HIGH);
+      last_activity = millis();
+      data->state = LV_INDEV_STATE_REL; /* Ignore first touch (wake up only) */
+      data->point.x = last_touch_x;
+      data->point.y = last_touch_y;
+      return;
+    }
+    last_activity = millis();
     data->state = LV_INDEV_STATE_PR;
     data->point.x = x;
     data->point.y = y;
@@ -115,7 +132,7 @@ void my_touchpad_read(lv_indev_drv_t *indev, lv_indev_data_t *data) {
  * SEND COMMAND TO BRIDGE
  * ============================================= */
 void sendCommand(const char *action) {
-  StaticJsonDocument<128> doc;
+  JsonDocument doc;
   doc["action"] = action;
   String json;
   serializeJson(doc, json);
@@ -193,6 +210,18 @@ void create_ctrl_btn(lv_obj_t *parent, const char *label, const char *action,
   lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, (void *)action);
 }
 
+/* Apply the default theme at runtime (dark=true => dark theme) */
+void apply_theme(bool dark) {
+  lv_disp_t *disp = lv_disp_get_default();
+  if (!disp) return;
+
+  lv_theme_t *th = lv_theme_default_init(disp, lv_palette_main(LV_PALETTE_BLUE),
+                                        lv_palette_main(LV_PALETTE_RED),
+                                        dark, LV_FONT_DEFAULT);
+  lv_disp_set_theme(disp, th);
+  Serial.printf("Applied theme: %s\n", dark ? "dark" : "light");
+}
+
 void build_ui() {
   lv_obj_t *tabview = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 50);
 
@@ -255,10 +284,41 @@ void build_ui() {
   create_ctrl_btn(tab2, "Stop SMB", "stop_smb", lv_color_hex(0xD00000));
   create_ctrl_btn(tab2, "Reboot", "reboot", lv_color_hex(0xFC6000));
   create_ctrl_btn(tab2, "Shutdown", "shutdown", lv_color_hex(0x800020));
+
+  /* Tab 3: Settings (gear icon)
+   * - Add a toggle to switch between dark and light theme at runtime
+   */
+  lv_obj_t *tab3 = lv_tabview_add_tab(tabview, LV_SYMBOL_SETTINGS " Settings");
+
+  lv_obj_t *lbl_theme = lv_label_create(tab3);
+  lv_label_set_text(lbl_theme, "Dark Theme");
+  lv_obj_align(lbl_theme, LV_ALIGN_TOP_LEFT, 10, 12);
+
+  lv_obj_t *sw = lv_switch_create(tab3);
+  lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, -10, 8);
+
+  /* Initialize switch to current default (compile-time) value */
+#if LV_THEME_DEFAULT_DARK
+  lv_obj_add_state(sw, LV_STATE_CHECKED);
+#else
+  lv_obj_clear_state(sw, LV_STATE_CHECKED);
+#endif
+
+  /* When changed, apply new theme */
+  lv_obj_add_event_cb(sw,
+                      [](lv_event_t *e) {
+                        lv_obj_t *s = lv_event_get_target(e);
+                        bool on = lv_obj_has_state(s, LV_STATE_CHECKED);
+                        apply_theme(on);
+                      },
+                      LV_EVENT_VALUE_CHANGED, NULL);
+
+  /* Apply initial theme according to LV_THEME_DEFAULT_DARK */
+  apply_theme(LV_THEME_DEFAULT_DARK);
 }
 
 void update_stats(String json) {
-  StaticJsonDocument<512> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json);
 
   if (error) {
@@ -296,6 +356,8 @@ void setup() {
   delay(500);
 
   /* Init Display */
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
   tft.init();
   tft.setRotation(1); /* Landscape */
   tft.fillScreen(TFT_BLACK);
@@ -327,10 +389,17 @@ void setup() {
   lv_indev_drv_register(&indev_drv);
 
   build_ui();
+  last_activity = millis();
 }
 
 void loop() {
   lv_timer_handler(); /* let the GUI do its work */
+
+  /* Auto-off backlight */
+  if (display_on && (millis() - last_activity > SCREEN_TIMEOUT)) {
+    display_on = false;
+    digitalWrite(TFT_BL, LOW);
+  }
 
   if (Serial.available()) {
     String data = Serial.readStringUntil('\n');
